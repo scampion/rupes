@@ -43,13 +43,10 @@ def thumbnail(sha256, media, metadata, size=(128, 128)):
             im.thumbnail(size)
             im.save(tb, "JPEG")
         elif mime == "video":
-            cmd = "ffmpeg -i %s -ss 00:00:05 -vframes 1 -filter:v scale='%s:-1' -f singlejpeg -" % (media, size[0])
-            print(cmd)
-            ffmpeg = subprocess.Popen(cmd.split(" "), stdout=subprocess.PIPE)
+            cmd = ['ffmpeg', '-i', media, '-ss', '00:00:05', '-vframes', '1',
+                   '-filter:v', "scale='%s:-1" % size[0], '-f', 'singlejpeg', '-']
+            ffmpeg = subprocess.Popen(cmd, stdout=subprocess.PIPE)
             tb.write(ffmpeg.stdout.read())
-            # from ffvideo import VideoStream
-            # pil_image = VideoStream(media).get_frame_at_sec(5).image()
-            # pil_image.save(tb)
         else:
             print("/!\ Warning thumbnail unavailable for media %s" % media)
         tb.seek(0)
@@ -57,10 +54,27 @@ def thumbnail(sha256, media, metadata, size=(128, 128)):
 
 
 def init(vault):
+    get_lock(vault)
     init_ktserver(vault)
     init_dynamodb(vault)
     if vault not in glacier.list_vaults():
         glacier.create_vault(vaultName=vault)
+
+
+def get_lock(vault):
+    table = dynamodb.Table(vault)
+    response = table.query(
+        KeyConditionExpression=Key('sha256').eq("lock")
+    )
+    if len(response['Items']) == 0 or response['Items'][0]['filename'] == "false":
+        table.put_item(Item={'sha256': 'lock', 'filename': 'true'})
+    else:
+        raise Exception("vault %s locked" % vault)
+
+
+def release_lock(vault):
+    table = dynamodb.Table(vault)
+    table.put_item(Item={'sha256': 'lock', 'filename': 'false'})
 
 
 def init_dynamodb(vault):
@@ -80,17 +94,20 @@ def init_ktserver(vault):
     response = s3.list_buckets()
     buckets = [bucket['Name'] for bucket in response['Buckets']]
     if "rupes" not in buckets:
-        s3.create_bucket(Bucket='rupes')
-    dbs = key['Key']
-    for key in s3.list_objects(Bucket='rupes')['Contents']:
-        if vault in dbs:
-            s3.Bucket('rupes').download_file(vault, vault)
-            decrypt(vault, vault + ".kch", rsa_pri)
+        s3.create_bucket(Bucket='rupes', CreateBucketConfiguration={'LocationConstraint': 'eu-west-3'})
+    list_db = s3.list_objects_v2(Bucket='rupes')
+    dbs = list_db['Contents'] if 'Contents' in list_db.keys() else []
+    for vault in list_db:
+        s3.Bucket('rupes').download_file(vault, vault)
+        decrypt(vault, vault + ".kch", rsa_pri)
     kyoto_server = subprocess.Popen(["ktserver", vault + ".kch"], stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid)
 
 
-def save():
-    os.killpg(os.getpgid(kyoto_server.pid), signal.SIGTERM)
+def save(vault):
+    # os.killpg(os.getpgid(kyoto_server.pid), signal.SIGTERM)
+    encrypt(vault + ".kch",  vault, rsa_pub)
+    s3.Bucket('rupes').upload_file(vault)
+    release_lock(vault)
 
 
 def sha256sum(filename):
@@ -153,7 +170,7 @@ def find(dir):
     unknown_ext = set()
     for filename in glob.iglob(dir + '**/*', recursive=True):
         ext = filename.split('.')[-1].lower()
-        if ext in ['jpg', 'png', 'mp4']:
+        if ext in ['jpg', 'png', 'mp4', '3gp', 'mov']:
             yield filename
         elif ext not in unknown_ext:
             unknown_ext.add(ext)
@@ -188,7 +205,8 @@ def upload(media, vault_name):
     response = table.query(
         KeyConditionExpression=Key('sha256').eq(sha_sum)
     )
-    if len(response['Items']) == 0:
+    if len(response['Items']) == 0 or requests.get("http://localhost:1978/%s" % sha_sum).status_code >= 400:
+        thumbnail(sha_sum, media, m)
         d = "%s %s %s" % (sha_sum, m['Creation date'], os.path.basename(media))
         response = glacier.upload_archive(vaultName=vault_name, archiveDescription=d, body=encfile)
         if 300 > response["ResponseMetadata"]["HTTPStatusCode"] >= 200:
@@ -212,6 +230,7 @@ def main(args):
             current_size += os.path.getsize(media)
             print("%02d%% - Upload %s - %s" % (perc, media, sizeof_fmt(os.path.getsize(media))))
 
+    save(args.vault)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
