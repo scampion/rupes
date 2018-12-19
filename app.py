@@ -6,6 +6,10 @@ import io
 import json
 import os
 import pathlib
+import signal
+import subprocess
+
+import requests
 import sys
 import time
 from getpass import getpass
@@ -18,6 +22,7 @@ from boto3.dynamodb.conditions import Key
 from hachoir.core import config as HachoirConfig
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
+from PIL import Image
 
 HachoirConfig.quiet = True
 home = str(pathlib.Path.home())
@@ -25,12 +30,40 @@ rsa_pub = os.path.join(home, ".ssh", "id_rsa.pub")
 rsa_pri = os.path.join(home, ".ssh", "id_rsa")
 
 glacier = boto3.client('glacier')
+s3 = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
+kyoto_server = None
+
+
+def thumbnail(sha256, media, metadata, size=(128, 128)):
+    mime = metadata['MIME type'].split('/')[0]
+    with io.BytesIO() as tb:
+        if mime == "image":
+            im = Image.open(media)
+            im.thumbnail(size)
+            im.save(tb, "JPEG")
+        elif mime == "video":
+            cmd = "ffmpeg -i %s -ss 00:00:05 -vframes 1 -filter:v scale='%s:-1' -f singlejpeg -" % (media, size[0])
+            print(cmd)
+            ffmpeg = subprocess.Popen(cmd.split(" "), stdout=subprocess.PIPE)
+            tb.write(ffmpeg.stdout.read())
+            # from ffvideo import VideoStream
+            # pil_image = VideoStream(media).get_frame_at_sec(5).image()
+            # pil_image.save(tb)
+        else:
+            print("/!\ Warning thumbnail unavailable for media %s" % media)
+        tb.seek(0)
+        requests.put("http://localhost:1978/%s" % sha256, data=tb.read())
 
 
 def init(vault):
+    init_ktserver(vault)
+    init_dynamodb(vault)
     if vault not in glacier.list_vaults():
         glacier.create_vault(vaultName=vault)
+
+
+def init_dynamodb(vault):
     dynamodb_client = boto3.client('dynamodb')
     existing_tables = dynamodb_client.list_tables()['TableNames']
     if vault not in existing_tables:
@@ -41,6 +74,23 @@ def init(vault):
             ProvisionedThroughput={'ReadCapacityUnits': 1, 'WriteCapacityUnits': 1}
         )
         print("Table status:", table.table_status)
+
+
+def init_ktserver(vault):
+    response = s3.list_buckets()
+    buckets = [bucket['Name'] for bucket in response['Buckets']]
+    if "rupes" not in buckets:
+        s3.create_bucket(Bucket='rupes')
+    dbs = key['Key']
+    for key in s3.list_objects(Bucket='rupes')['Contents']:
+        if vault in dbs:
+            s3.Bucket('rupes').download_file(vault, vault)
+            decrypt(vault, vault + ".kch", rsa_pri)
+    kyoto_server = subprocess.Popen(["ktserver", vault + ".kch"], stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid)
+
+
+def save():
+    os.killpg(os.getpgid(kyoto_server.pid), signal.SIGTERM)
 
 
 def sha256sum(filename):
