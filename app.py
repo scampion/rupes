@@ -6,23 +6,20 @@ import io
 import json
 import os
 import pathlib
-import signal
 import subprocess
-
-import requests
-import sys
 import time
 from getpass import getpass
 
 import boto3
+import requests
 from Crypto.Cipher import AES, PKCS1_OAEP
 from Crypto.PublicKey import RSA
 from Crypto.Random import get_random_bytes
+from PIL import Image
 from boto3.dynamodb.conditions import Key
 from hachoir.core import config as HachoirConfig
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
-from PIL import Image
 
 HachoirConfig.quiet = True
 home = str(pathlib.Path.home())
@@ -54,7 +51,7 @@ def thumbnail(sha256, media, metadata, size=(128, 128)):
 
 
 def init(vault):
-    get_lock(vault)
+    #get_lock(vault) #DEBUG FIXME
     init_ktserver(vault)
     init_dynamodb(vault)
     if vault not in glacier.list_vaults():
@@ -87,7 +84,6 @@ def init_dynamodb(vault):
             AttributeDefinitions=[{'AttributeName': 'sha256', 'AttributeType': 'S'}],
             ProvisionedThroughput={'ReadCapacityUnits': 1, 'WriteCapacityUnits': 1}
         )
-        print("Table status:", table.table_status)
 
 
 def init_ktserver(vault):
@@ -97,16 +93,19 @@ def init_ktserver(vault):
         s3.create_bucket(Bucket='rupes', CreateBucketConfiguration={'LocationConstraint': 'eu-west-3'})
     list_db = s3.list_objects_v2(Bucket='rupes')
     dbs = list_db['Contents'] if 'Contents' in list_db.keys() else []
-    for vault in list_db:
-        s3.Bucket('rupes').download_file(vault, vault)
+    if vault in dbs:
+        boto3.resource('s3').Bucket('rupes').download_file(vault, vault)
         decrypt(vault, vault + ".kch", rsa_pri)
-    kyoto_server = subprocess.Popen(["ktserver", vault + ".kch"], stdout=subprocess.PIPE, shell=True, preexec_fn=os.setsid)
+    kyoto_server = subprocess.Popen(["ktserver", vault + ".kch"], stdout=subprocess.PIPE, shell=True,
+                                    preexec_fn=os.setsid)
 
 
 def save(vault):
-    # os.killpg(os.getpgid(kyoto_server.pid), signal.SIGTERM)
-    encrypt(vault + ".kch",  vault, rsa_pub)
-    s3.Bucket('rupes').upload_file(vault)
+    # os.killpg(os.getpgid(kyoto_server.pid), signal.SIGTERM) # FIXME
+    with open(vault + ".kch", 'rb') as i:
+        with open(vault, 'wb') as v:
+            encrypt(i, v, rsa_pub)
+    boto3.resource('s3').meta.client.upload_file(vault, 'rupes', vault)
     release_lock(vault)
 
 
@@ -151,16 +150,16 @@ def decrypt(ifile, filepath, rsa_pri):
         o.write(data)
 
 
-def inventory(vaultName='photos'):
-    job_req = glacier.initiate_job(vaultName=vaultName, jobParameters={'Type': 'inventory-retrieval'})
+def inventory(vault='photos'):
+    job_req = glacier.initiate_job(vaultName=vault, jobParameters={'Type': 'inventory-retrieval'})
     while True:
-        status = glacier.describe_job(vaultName=vaultName, jobId=job_req['jobId'])
+        status = glacier.describe_job(vaultName=vault, jobId=job_req['jobId'])
         if status['Completed']:
             break
         print("Wait inventory")
         time.sleep(300)
 
-    job_resp = glacier.get_job_output(vaultName=vaultName, jobId=job_req['jobId'])
+    job_resp = glacier.get_job_output(vaultName=vault, jobId=job_req['jobId'])
     output = job_resp['body'].read()  # first download the output and then parse the JSON
     archive_list = json.loads(output)['ArchiveList']
     return archive_list
@@ -231,6 +230,7 @@ def main(args):
             print("%02d%% - Upload %s - %s" % (perc, media, sizeof_fmt(os.path.getsize(media))))
 
     save(args.vault)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
