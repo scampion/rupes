@@ -47,9 +47,6 @@ def thumbnail(sha256, media, metadata, size=(128, 128)):
             print(cmd)
             ffmpeg = subprocess.Popen(cmd.split(" "), stdout=subprocess.PIPE)
             tb.write(ffmpeg.stdout.read())
-            # from ffvideo import VideoStream
-            # pil_image = VideoStream(media).get_frame_at_sec(5).image()
-            # pil_image.save(tb)
         else:
             print("/!\ Warning thumbnail unavailable for media %s" % media)
         tb.seek(0)
