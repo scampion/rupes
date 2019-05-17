@@ -1,3 +1,11 @@
+# RUPES
+Enable to store your encrypted digital photo library in Amazon S3 Glacier.
+AES key is use to encrypt large binary for a fast computing step. 
+The private AES key is encoded by your ssh RSA key at the beginning of the file. 
+
+From the french word rupestre a reference to cave painting. 
+
+## Dependencies
 kyoto-tycoon 
 ffmpeg 
 
